@@ -294,23 +294,40 @@ async def download_and_decrypt_video(url, cmd, name, key):
 
 MAX_FILE_SIZE_BYTES = 2000 * 1024 * 1024  # 2000 MB in bytes
 
-async def split_video(filename, part_duration_secs=3600):
-    """Split a video into parts using ffmpeg segment muxer. Returns list of part file paths."""
+async def split_video(filename):
+    """Split a video into parts of ~1999 MB each using ffmpeg segment muxer."""
     base, ext = os.path.splitext(filename)
     pattern = f"{base}_part%03d{ext}"
+
+    # Calculate how many parts we need based on file size
+    file_size = os.path.getsize(filename)
+    part_size = 1999 * 1024 * 1024  # 1999 MB in bytes
+    num_parts = ceil(file_size / part_size)
+
+    # Get total duration using ffprobe
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", filename],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    )
+    total_duration = float(result.stdout.strip() or 0)
+
+    # Calculate duration per part proportionally
+    part_duration_secs = int(total_duration / num_parts) if num_parts > 1 else int(total_duration)
+
     cmd = (
         f'ffmpeg -i "{filename}" -c copy -map 0 '
         f'-segment_time {part_duration_secs} -f segment -reset_timestamps 1 '
         f'"{pattern}" -y'
     )
     subprocess.run(cmd, shell=True)
+
     # Collect generated part files in order
+    dir_name = os.path.dirname(filename) or "."
     parts = sorted([
-        f for f in os.listdir(os.path.dirname(filename) or ".")
+        f for f in os.listdir(dir_name)
         if os.path.basename(f).startswith(os.path.basename(base) + "_part") and f.endswith(ext)
     ])
-    # Return full paths
-    dir_name = os.path.dirname(filename) or "."
     return [os.path.join(dir_name, p) for p in parts]
 
 async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, channel_id):
