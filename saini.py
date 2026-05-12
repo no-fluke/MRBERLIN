@@ -292,9 +292,30 @@ async def download_and_decrypt_video(url, cmd, name, key):
             print(f"Failed to decrypt {video_path}.")  
             return None  
 
+MAX_FILE_SIZE_BYTES = 2000 * 1024 * 1024  # 2000 MB in bytes
+
+async def split_video(filename, part_duration_secs=3600):
+    """Split a video into parts using ffmpeg segment muxer. Returns list of part file paths."""
+    base, ext = os.path.splitext(filename)
+    pattern = f"{base}_part%03d{ext}"
+    cmd = (
+        f'ffmpeg -i "{filename}" -c copy -map 0 '
+        f'-segment_time {part_duration_secs} -f segment -reset_timestamps 1 '
+        f'"{pattern}" -y'
+    )
+    subprocess.run(cmd, shell=True)
+    # Collect generated part files in order
+    parts = sorted([
+        f for f in os.listdir(os.path.dirname(filename) or ".")
+        if os.path.basename(f).startswith(os.path.basename(base) + "_part") and f.endswith(ext)
+    ])
+    # Return full paths
+    dir_name = os.path.dirname(filename) or "."
+    return [os.path.join(dir_name, p) for p in parts]
+
 async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, channel_id):
     subprocess.run(f'ffmpeg -i "{filename}" -ss 00:00:10 -vframes 1 "{filename}.jpg"', shell=True)
-    await prog.delete (True)
+    await prog.delete(True)
     reply1 = await bot.send_message(channel_id, f"**📩 Uploading Video 📩:-**\n<blockquote>**{name}**</blockquote>")
     reply = await m.reply_text(f"**Generate Thumbnail:**\n<blockquote>**{name}**</blockquote>")
     try:
@@ -302,18 +323,71 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
             thumbnail = f"{filename}.jpg"
         else:
             thumbnail = thumb
-            
     except Exception as e:
         await m.reply_text(str(e))
-      
+
     dur = int(duration(filename))
     start_time = time.time()
+    file_size = os.path.getsize(filename)
 
     try:
-        await bot.send_video(channel_id, filename, caption=cc, supports_streaming=True, height=720, width=1280, thumb=thumbnail, duration=dur, progress=progress_bar, progress_args=(reply, start_time))
-    except Exception:
-        await bot.send_document(channel_id, filename, caption=cc, progress=progress_bar, progress_args=(reply, start_time))
-    os.remove(filename)
-    await reply.delete(True)
-    await reply1.delete(True)
-    os.remove(f"{filename}.jpg")
+        if file_size > MAX_FILE_SIZE_BYTES:
+            # File exceeds 2000 MB — split it into parts
+            await m.reply_text(f"⚠️ File size is **{file_size // (1024*1024)} MB**, splitting into parts...")
+            parts = await split_video(filename)
+            if not parts:
+                # Fallback: if splitting failed, try sending as-is (will likely fail on Telegram side)
+                await m.reply_text("❌ Splitting failed, attempting to send original file...")
+                parts = [filename]
+            for idx, part_file in enumerate(parts, start=1):
+                part_caption = f"{cc}\n\n📦 **Part {idx}/{len(parts)}**"
+                part_dur = int(duration(part_file))
+                start_time = time.time()
+                try:
+                    await bot.send_video(
+                        channel_id, part_file,
+                        caption=part_caption,
+                        supports_streaming=True,
+                        height=720, width=1280,
+                        thumb=thumbnail,
+                        duration=part_dur,
+                        progress=progress_bar,
+                        progress_args=(reply, start_time)
+                    )
+                except Exception:
+                    await bot.send_document(
+                        channel_id, part_file,
+                        caption=part_caption,
+                        progress=progress_bar,
+                        progress_args=(reply, start_time)
+                    )
+                if part_file != filename and os.path.exists(part_file):
+                    os.remove(part_file)
+        else:
+            # File is within limit — send normally
+            try:
+                await bot.send_video(
+                    channel_id, filename,
+                    caption=cc,
+                    supports_streaming=True,
+                    height=720, width=1280,
+                    thumb=thumbnail,
+                    duration=dur,
+                    progress=progress_bar,
+                    progress_args=(reply, start_time)
+                )
+            except Exception:
+                await bot.send_document(
+                    channel_id, filename,
+                    caption=cc,
+                    progress=progress_bar,
+                    progress_args=(reply, start_time)
+                )
+    finally:
+        if os.path.exists(filename):
+            os.remove(filename)
+        await reply.delete(True)
+        await reply1.delete(True)
+        thumb_path = f"{filename}.jpg"
+        if os.path.exists(thumb_path):
+            os.remove(thumb_path)
